@@ -62,7 +62,9 @@
 #endif
 
 #include "ARTPWriter.h"
+#ifdef QCOM_HARDWARE
 #include <cutils/properties.h>
+#endif
 
 namespace android {
 
@@ -1615,7 +1617,17 @@ status_t StagefrightRecorder::setupVideoEncoder(
 
     uint32_t encoder_flags = 0;
     if (mIsMetaDataStoredInVideoBuffers) {
+        ALOGW("Camera source supports metadata mode, create OMXCodec for metadata");
         encoder_flags |= OMXCodec::kStoreMetaDataInVideoBuffers;
+#ifdef QCOM_HARDWARE
+        char value[PROPERTY_VALUE_MAX];
+        if (property_get("ro.board.platform", value, "0")
+            && (!strncmp(value, "msm7627a", sizeof("msm7627a") - 1) ||
+                !strncmp(value, "msm7x27a", sizeof("msm7x27a") - 1))) {
+            ALOGW("msm7627 family of chipsets supports, only one buffer at a time");
+            encoder_flags |= OMXCodec::kOnlySubmitOneInputBufferAtOneTime;
+        }
+#endif
     }
 
     // Do not wait for all the input buffers to become available.
