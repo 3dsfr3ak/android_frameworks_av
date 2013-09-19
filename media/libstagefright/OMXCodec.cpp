@@ -90,6 +90,10 @@ const static int64_t kBufferFilledEventTimeOutNs = 3000000000LL;
 // component in question is buggy or not.
 const static uint32_t kMaxColorFormatSupported = 1000;
 
+#ifdef QCOM_LEGACY_OMX
+static const int QOMX_COLOR_FormatYUV420PackedSemiPlanar64x32Tile2m8ka = 0x7FA30C03;
+static const int OMX_QCOM_COLOR_FormatYVU420SemiPlanar = 0x7FA30C00;
+#endif
 
 #define FACTORY_CREATE(name) \
 static sp<MediaSource> Make##name(const sp<MediaSource> &source) { \
@@ -253,6 +257,20 @@ void OMXCodec::findMatchingCodecs(
     }
 
     size_t index = 0;
+
+#ifdef ENABLE_QC_AV_ENHANCEMENTS
+    //Check if application specially reuqested for  aac hardware encoder
+    //This is not a part of  mediacodec list
+    if (matchComponentName && !strcmp("OMX.qcom.audio.encoder.aac", matchComponentName)) {
+        matchingCodecs->add();
+
+        CodecNameAndQuirks *entry = &matchingCodecs->editItemAt(index);
+        entry->mName = String8("OMX.qcom.audio.encoder.aac");
+        entry->mQuirks = 0;
+        return;
+    }
+#endif
+
     for (;;) {
         ssize_t matchIndex =
             list->findCodecByType(mime, createEncoder, index);
@@ -351,6 +369,14 @@ bool OMXCodec::findCodecQuirks(const char *componentName, uint32_t *quirks) {
     if (list == NULL) {
         return false;
     }
+#ifdef ENABLE_QC_AV_ENHANCEMENTS
+    //Check for aac hardware encoder
+    //This is not a part of  mediacodec list
+    if (componentName && !strcmp("OMX.qcom.audio.encoder.aac", componentName)) {
+        *quirks = 0;
+        return true;
+    }
+#endif
 
     ssize_t index = list->findCodecByName(componentName);
 
@@ -986,6 +1012,9 @@ status_t OMXCodec::setVideoInputFormat(
     success = success && meta->findInt32(kKeyBitRate, &bitRate);
     success = success && meta->findInt32(kKeyStride, &stride);
     success = success && meta->findInt32(kKeySliceHeight, &sliceHeight);
+#ifdef QCOM_LEGACY_OMX
+    CODEC_LOGI("setVideoInputFormat width=%ld, height=%ld", width, height);
+#endif
     CHECK(success);
     CHECK(stride != 0);
 
@@ -1079,7 +1108,11 @@ status_t OMXCodec::setVideoInputFormat(
 
     video_def->nFrameWidth = width;
     video_def->nFrameHeight = height;
+#ifdef QCOM_LEGACY_OMX
+    video_def->xFramerate = (frameRate << 16);
+#else
     video_def->xFramerate = 0;      // No need for output port
+#endif
     video_def->nBitrate = bitRate;  // Q16 format
     video_def->eCompressionFormat = compressionFormat;
     video_def->eColorFormat = OMX_COLOR_FormatUnused;
@@ -1619,7 +1652,11 @@ OMXCodec::OMXCodec(
       mPaused(false),
       mNativeWindow(
               (!strncmp(componentName, "OMX.google.", 11)
-              || !strcmp(componentName, "OMX.Nvidia.mpeg2v.decode"))
+              || !strcmp(componentName, "OMX.Nvidia.mpeg2v.decode")
+#ifdef QCOM_LEGACY_OMX
+              || !strncmp(componentName, "OMX.qcom",8)
+#endif
+              )
                         ? NULL : nativeWindow),
       mNumBFrames(0),
       mInSmoothStreamingMode(false)
@@ -1808,6 +1845,10 @@ bool OMXCodec::isIntermediateState(State state) {
         || state == IDLE_TO_EXECUTING
         || state == EXECUTING_TO_IDLE
         || state == IDLE_TO_LOADED
+#ifdef QCOM_HARDWARE
+        || state == PAUSING
+        || state == FLUSHING
+#endif
         || state == RECONFIGURING;
 }
 
@@ -1834,6 +1875,7 @@ status_t OMXCodec::allocateBuffersOnPort(OMX_U32 portIndex) {
     status_t err = OK;
     if ((mFlags & kStoreMetaDataInVideoBuffers)
             && portIndex == kPortIndexInput) {
+        ALOGW("Trying to enable metadata mode on encoder");
         err = mOMX->storeMetaDataInBuffers(mNode, kPortIndexInput, OMX_TRUE);
         if (err != OK) {
             ALOGE("Storing meta data in video buffers is not supported");
@@ -3126,6 +3168,18 @@ void OMXCodec::onStateChange(OMX_STATETYPE newState) {
             break;
         }
 
+#ifdef QCOM_HARDWARE
+        case OMX_StatePause:
+        {
+           CODEC_LOGV("Now paused.");
+
+           CHECK_EQ((int)mState, (int)PAUSING);
+
+           setState(PAUSED);
+           break;
+        }
+#endif
+
         case OMX_StateInvalid:
         {
             setState(ERROR);
@@ -3240,7 +3294,11 @@ void OMXCodec::onPortSettingsChanged(OMX_U32 portIndex) {
 
 bool OMXCodec::flushPortAsync(OMX_U32 portIndex) {
     CHECK(mState == EXECUTING || mState == RECONFIGURING
+#ifndef QCOM_HARDWARE
             || mState == EXECUTING_TO_IDLE);
+#else
+            || mState == EXECUTING_TO_IDLE || mState == FLUSHING);
+#endif
 
     if (portIndex == (OMX_U32) -1 ) {
         mPortStatus[kPortIndexInput] = SHUTTING_DOWN;
@@ -3295,7 +3353,11 @@ status_t OMXCodec::enablePortAsync(OMX_U32 portIndex) {
 }
 
 void OMXCodec::fillOutputBuffers() {
+#ifndef QCOM_HARDWARE
     CHECK_EQ((int)mState, (int)EXECUTING);
+#else
+    CHECK(mState == EXECUTING || mState == FLUSHING);
+#endif
 
     // This is a workaround for some decoders not properly reporting
     // end-of-output-stream. If we own all input buffers and also own
@@ -3330,7 +3392,11 @@ void OMXCodec::fillOutputBuffers() {
 }
 
 void OMXCodec::drainInputBuffers() {
+#ifndef QCOM_HARDWARE
     CHECK(mState == EXECUTING || mState == RECONFIGURING);
+#else
+    CHECK(mState == EXECUTING || mState == RECONFIGURING || mState == FLUSHING);
+#endif
 
     if (mFlags & kUseSecureInputBuffers) {
         Vector<BufferInfo> *buffers = &mPortBuffers[kPortIndexInput];
@@ -3567,6 +3633,10 @@ bool OMXCodec::drainInputBuffer(BufferInfo *info) {
 
             status_t err = mOMX->getParameter(mNode, OMX_IndexParamPortDefinition,
             &def, sizeof(def));
+#ifdef QCOM_LEGACY_OMX
+            // Don't run this check with the legacy encoder
+            if (strncmp(mComponentName, "OMX.qcom.video.encoder.", 23))
+#endif
             CHECK_EQ(err, (status_t)OK);
 
             if (def.eDomain == OMX_PortDomainVideo) {
@@ -3782,12 +3852,14 @@ status_t OMXCodec::waitForBufferFilled_l() {
         return mBufferFilled.wait(mLock);
     }
     status_t err = mBufferFilled.waitRelative(mLock, kBufferFilledEventTimeOutNs);
+#ifdef QCOM_HARDWARE
     if ((err == -ETIMEDOUT) && (mPaused == true)){
         // When the audio playback is paused, the fill buffer maybe timed out
         // if input data is not available to decode. Hence, considering the
         // timed out as a valid case.
         err = OK;
     }
+#endif
     if (err != OK) {
         CODEC_LOGE("Timed out waiting for output buffers: %d/%d",
             countBuffersWeOwn(mPortBuffers[kPortIndexInput]),
@@ -4136,7 +4208,32 @@ void OMXCodec::clearCodecSpecificData() {
 }
 
 status_t OMXCodec::start(MetaData *meta) {
+    CODEC_LOGV("OMXCodec::start ");
     Mutex::Autolock autoLock(mLock);
+
+#ifdef QCOM_HARDWARE
+    if (mPaused) {
+        if (!strncmp(mComponentName, "OMX.qcom.", 9)) {
+            while (isIntermediateState(mState)) {
+                mAsyncCompletion.wait(mLock);
+            }
+            CHECK_EQ(mState, (status_t)PAUSED);
+            status_t err = mOMX->sendCommand(mNode,
+            OMX_CommandStateSet, OMX_StateExecuting);
+            CHECK_EQ(err, (status_t)OK);
+            setState(IDLE_TO_EXECUTING);
+            mPaused = false;
+            while (mState != EXECUTING && mState != ERROR) {
+                mAsyncCompletion.wait(mLock);
+            }
+            drainInputBuffers();
+            return mState == ERROR ? UNKNOWN_ERROR : OK;
+        } else {   // SW Codec
+            mPaused = false;
+            return OK;
+        }
+    }
+#endif
 
     if (mState != LOADED) {
         CODEC_LOGE("called start in the unexpected state: %d", mState);
@@ -4250,6 +4347,9 @@ status_t OMXCodec::stopOmxComponent_l() {
             isError = true;
         }
 
+#ifdef QCOM_HARDWARE
+        case PAUSED:
+#endif
         case EXECUTING:
         {
             setState(EXECUTING_TO_IDLE);
@@ -4400,6 +4500,7 @@ status_t OMXCodec::read(
 
         CHECK_EQ((int)mState, (int)EXECUTING);
 #ifdef QCOM_HARDWARE
+        setState(FLUSHING);
         //DSP supports flushing of ports simultaneously. Flushing individual port is not supported.
 
         if(mQuirks & kRequiresGlobalFlush) {
@@ -4446,6 +4547,13 @@ status_t OMXCodec::read(
 #endif
            mFilledBuffers.empty()) {
         if ((err = waitForBufferFilled_l()) != OK) {
+            if ((err == -ETIMEDOUT) && (mPaused == true) && !mIsVideo) {
+                // When the audio playback is paused, the fill buffer maybe timed out
+                // if input data is not available to decode. Hence, considering the
+                // timed out as a valid case.
+                ALOGV("returned OK instead of timedout from read() as mPaused is true");
+                err = OK;
+            }
             return err;
         }
     }
@@ -4453,6 +4561,13 @@ status_t OMXCodec::read(
     if (mState == ERROR) {
         return UNKNOWN_ERROR;
     }
+
+#ifdef QCOM_HARDWARE
+    if (seeking) {
+        CHECK_EQ((int)mState, (int)FLUSHING);
+        setState(EXECUTING);
+    }
+#endif
 
     if (mFilledBuffers.empty()) {
 #ifdef QCOM_HARDWARE
@@ -5092,6 +5207,12 @@ void OMXCodec::initOutputFormat(const sp<MetaData> &inputFormat) {
 
             mOutputFormat->setInt32(kKeyWidth, video_def->nFrameWidth);
             mOutputFormat->setInt32(kKeyHeight, video_def->nFrameHeight);
+#ifdef QCOM_LEGACY_OMX
+            // With legacy codec we get wrong color format here
+            if (!strncmp(mComponentName, "OMX.qcom.", 9))
+                mOutputFormat->setInt32(kKeyColorFormat, OMX_QCOM_COLOR_FormatYVU420SemiPlanar);
+            else
+#endif
             mOutputFormat->setInt32(kKeyColorFormat, video_def->eColorFormat);
 
             if (!mIsEncoder) {
@@ -5164,11 +5285,40 @@ void OMXCodec::initOutputFormat(const sp<MetaData> &inputFormat) {
 }
 
 status_t OMXCodec::pause() {
+#ifndef QCOM_HARDWARE
     Mutex::Autolock autoLock(mLock);
 
     mPaused = true;
 
     return OK;
+#else
+   CODEC_LOGV("pause mState=%d", mState);
+
+   Mutex::Autolock autoLock(mLock);
+
+   if (mState != EXECUTING) {
+       return UNKNOWN_ERROR;
+   }
+
+   while (isIntermediateState(mState)) {
+       mAsyncCompletion.wait(mLock);
+   }
+   if (!strncmp(mComponentName, "OMX.qcom.", 9)) {
+       status_t err = mOMX->sendCommand(mNode,
+           OMX_CommandStateSet, OMX_StatePause);
+       CHECK_EQ(err, (status_t)OK);
+       setState(PAUSING);
+
+       mPaused = true;
+       while (mState != PAUSED && mState != ERROR) {
+           mAsyncCompletion.wait(mLock);
+       }
+       return mState == ERROR ? UNKNOWN_ERROR : OK;
+   } else {
+       mPaused = true;
+       return OK;
+   }
+#endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////

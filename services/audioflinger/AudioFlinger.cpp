@@ -645,11 +645,11 @@ Exit:
 
 void AudioFlinger::deleteEffectSession()
 {
+    Mutex::Autolock _l(mLock);
     ALOGV("deleteSession");
     // -2 is invalid session ID
     mLPASessionId = -2;
     if (mLPAEffectChain != NULL) {
-        mLPAEffectChain->lock();
         mLPAEffectChain->setLPAFlag(false);
         size_t i, numEffects = mLPAEffectChain->getNumEffects();
         for(i = 0; i < numEffects; i++) {
@@ -662,7 +662,6 @@ void AudioFlinger::deleteEffectSession()
             }
             effect->configure();
         }
-        mLPAEffectChain->unlock();
         mLPAEffectChain.clear();
         mLPAEffectChain = NULL;
     }
@@ -1791,6 +1790,7 @@ audio_io_handle_t AudioFlinger::openOutput(audio_module_handle_t module,
             desc->mVolumeLeft = 1.0;
             desc->mVolumeRight = 1.0;
             desc->device = *pDevices;
+            desc->trackRefPtr = NULL;
             mDirectAudioTracks.add(id, desc);
             mDirectDevice = desc->device;
         } else
